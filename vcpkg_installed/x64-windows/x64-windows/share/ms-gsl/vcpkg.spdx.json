@@ -1,0 +1,110 @@
+{
+  "$schema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.2.1/schemas/spdx-schema.json",
+  "spdxVersion": "SPDX-2.2",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "documentNamespace": "https://spdx.org/spdxdocs/ms-gsl-x64-windows-4.2.0-39a945e4-9ae3-4d76-bf93-1e8fcfbe7055",
+  "name": "ms-gsl:x64-windows@4.2.0 ad11db4e757d35d8f0b640a290990b9582465a69e8162a2d6354e9d382afbcfb",
+  "creationInfo": {
+    "creators": [
+      "Tool: vcpkg-2025-01-11-0f310537c75015100d200eb71b137f6376aad510"
+    ],
+    "created": "2026-02-05T19:27:01Z"
+  },
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "GENERATES",
+      "relatedSpdxElement": "SPDXRef-binary"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "GENERATED_FROM",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-0",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-1",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    }
+  ],
+  "packages": [
+    {
+      "name": "ms-gsl",
+      "SPDXID": "SPDXRef-port",
+      "versionInfo": "4.2.0",
+      "downloadLocation": "git+https://github.com/microsoft/vcpkg@89dc0d1fedfee5424e09ce46e2b2c154ae392722",
+      "homepage": "https://github.com/Microsoft/GSL",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "description": "Microsoft implementation of the Guidelines Support Library",
+      "comment": "This is the port (recipe) consumed by vcpkg."
+    },
+    {
+      "name": "ms-gsl:x64-windows",
+      "SPDXID": "SPDXRef-binary",
+      "versionInfo": "ad11db4e757d35d8f0b640a290990b9582465a69e8162a2d6354e9d382afbcfb",
+      "downloadLocation": "NONE",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "comment": "This is a binary package built by vcpkg."
+    },
+    {
+      "SPDXID": "SPDXRef-resource-0",
+      "name": "Microsoft/GSL",
+      "downloadLocation": "git+https://github.com/Microsoft/GSL@v4.2.0",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "f325c70fb02ead99c5be333baa0793573dd091fe111b20ff13b2d524b71f1357bbc365a66684a8c791796095284cc6a968fc3c7284a0b3c0646a38a61e46792c"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./C:/Users/david/AppData/Local/vcpkg/registries/git-trees/89dc0d1fedfee5424e09ce46e2b2c154ae392722/portfile.cmake",
+      "SPDXID": "SPDXRef-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "a078df54018d25a30d6634238fc24bccd52c27d7f15812aef7d2f95c2135a08d"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./C:/Users/david/AppData/Local/vcpkg/registries/git-trees/89dc0d1fedfee5424e09ce46e2b2c154ae392722/vcpkg.json",
+      "SPDXID": "SPDXRef-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "43c6fcadfe63c6ecb0bd8491311265502598ed3f97a108bca3cb2fe802331e2a"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+Package: vcpkg-cmake-config
+Version: 2024-05-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: e78dca7bbd945330256fbaaff4e26c5d12cd7dfcaa1a68167189eeb91325bfa0
+Status: install ok installed
+
+Package: vcpkg-cmake
+Version: 2024-04-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 139440f88fa1eaff0dd8b6a46a5c756fa6b3940652f582d75be5266969915062
+Status: install ok installed
+
+Package: ms-gsl
+Version: 4.2.0
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: ad11db4e757d35d8f0b640a290990b9582465a69e8162a2d6354e9d382afbcfb
+Description: Microsoft implementation of the Guidelines Support Library
+Status: install ok installed
+
