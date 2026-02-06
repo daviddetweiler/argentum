@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <fstream>
@@ -7,6 +8,7 @@
 #include <new>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <gsl/gsl>
@@ -41,17 +43,29 @@ namespace argentum {
 			type* try_allocate(pack_types&&... pack) noexcept(new(std::declval<void*>())
 																  type {std::declval<decltype(pack)>()})
 			{
+				const auto attempt = try_many<type>(1);
+				if (!attempt.size())
+					return nullptr;
+
+				return &attempt.front();
+			}
+
+			template <typename type>
+			gsl::span<type> try_many(std::size_t count)
+			{
+				Expects(count > 0);
+
 				static_assert(std::is_trivially_destructible_v<type>, "type must be trivially destructible");
 
 				auto space = buffer.size() - top;
 				void* ptr = &buffer.at(top);
-				const auto result = std::align(alignof(type), sizeof(type), ptr, space);
+				const auto result = std::align(alignof(type), sizeof(type) * count, ptr, space);
 				if (!result)
-					return result;
+					return {};
 
 				top = buffer.size() - space - sizeof(type);
 
-				return new (result) type {std::forward<pack_types...>(pack...)};
+				return {new (result) type {}, count};
 			}
 
 			auto here() noexcept { return top; }
@@ -68,6 +82,33 @@ namespace argentum {
 			std::size_t top {};
 		};
 
+		struct node;
+
+		using list = gsl::span<node>;
+		using str = std::string_view;
+		using num = std::int64_t;
+
+		struct dict : std::pair<gsl::span<str>, gsl::span<node>> {
+			node* operator[](str key)
+			{
+				const auto base = first.begin();
+				const auto sentinel = first.end();
+				const auto maybe = std::find(base, sentinel, key);
+				if (maybe == sentinel)
+					return nullptr;
+
+				return &second[maybe - base];
+			}
+		};
+
+		struct node : std::variant<list, dict, num, str> {};
+
+		static_assert(std::is_trivially_destructible_v<node>);
+		static_assert(std::is_trivially_destructible_v<num>);
+		static_assert(std::is_trivially_destructible_v<str>);
+		static_assert(std::is_trivially_destructible_v<list>);
+		static_assert(std::is_trivially_destructible_v<dict>);
+
 		// Bencoding parser
 		// How will memory management work for the parse nodes?
 		// How often will we need to parse bencoding? It's not heavily involved in the peer protocol
@@ -76,11 +117,18 @@ namespace argentum {
 
 		public:
 			bparser() = default;
-			bparser(gsl::span<const char> data) noexcept : end(data.end()), pos(data.begin()) {}
+
+			bparser(gsl::span<const char> data, std::size_t capacity) :
+				stack {capacity},
+				end {data.end()},
+				pos {data.begin()}
+			{
+			}
 
 			auto try_decode() noexcept { return any(); }
 
 		private:
+			stack_allocator stack {};
 			iterator end {};
 			iterator pos {};
 
@@ -238,7 +286,7 @@ int main(int argc, char** argv)
 	}
 
 	const auto metainfo_buffer = argentum::load_file(args[1]);
-	argentum::bparser parser {metainfo_buffer};
+	argentum::bparser parser {metainfo_buffer, 1024};
 	const auto maybe_parsed = parser.try_decode();
 	if (!maybe_parsed) {
 		std::cerr << "Failed to parse metainfo file" << std::endl;
