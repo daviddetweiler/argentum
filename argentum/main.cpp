@@ -1,14 +1,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <new>
 #include <optional>
+#include <ostream>
 #include <string_view>
-#include <unordered_map>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -29,6 +32,7 @@ namespace argentum {
 		auto load_file(gsl::czstring filename)
 		{
 			std::ifstream file {filename, std::ifstream::binary | std::ifstream::ate};
+			file.exceptions(file.badbit | file.failbit);
 			const auto size = file.tellg();
 			std::vector<char> buffer(size);
 			file.seekg(0);
@@ -89,7 +93,7 @@ namespace argentum {
 		using list = std::vector<node>;
 		using str = std::string_view;
 		using num = std::int64_t;
-		using dict = std::unordered_map<std::string_view, node>;
+		using dict = std::map<std::string_view, node>;
 
 		struct node : std::variant<list, dict, num, str> {};
 
@@ -300,14 +304,86 @@ namespace argentum {
 
 			std::optional<node> any() noexcept { return attempt<node, &bparser::rule_any>(); }
 		};
+
+		void dump(std::ostream& stream, const node& n);
+
+		void dump(std::ostream& stream, const list& l)
+		{
+			stream << '[';
+			auto is_first = true;
+			for (const auto& n : l) {
+				if (!is_first)
+					stream << ',';
+
+				is_first = false;
+				dump(stream, n);
+			}
+
+			stream << ']';
+		}
+
+		void dump(std::ostream& stream, const str& s)
+		{
+			stream << '"';
+			for (const unsigned char ch : s) {
+				if (ch == '"' || ch == '\\')
+					stream << '\\' << ch;
+				else if (std::isprint(ch))
+					stream << ch;
+				else
+					stream << std::format("\\x{:2x}", ch);
+			}
+
+			stream << '"';
+		}
+
+		void dump(std::ostream& stream, const dict& d)
+		{
+			stream << '{';
+			auto is_first = true;
+			for (const auto& item : d) {
+				if (!is_first)
+					stream << ',';
+
+				is_first = false;
+				dump(stream, item.first);
+				stream << ':';
+				dump(stream, item.second);
+			}
+
+			stream << '}';
+		}
+
+		void dump(std::ostream& stream, const num& n) { stream << n; }
+
+		void dump(std::ostream& stream, const node& n)
+		{
+			// Wait... how tf does passing a generic lambda as an argument work?
+			// The implied templating happens only on its call operator, that's how
+			const auto visitor = [&stream](auto&& obj) {
+				using type = std::decay_t<decltype(obj)>;
+				if constexpr (std::is_same_v<type, num>)
+					dump(stream, obj);
+				else if constexpr (std::is_same_v<type, list>)
+					dump(stream, obj);
+				else if constexpr (std::is_same_v<type, dict>)
+					dump(stream, obj);
+				else if constexpr (std::is_same_v<type, str>)
+					dump(stream, obj);
+				else if constexpr (true)
+					static_assert(false);
+			};
+
+			std::visit(visitor, n);
+		}
 	}
 }
 
 int main(int argc, char** argv)
 {
 	const gsl::span args {argv, gsl::narrow_cast<std::size_t>(argc)};
-	if (argc != 2) {
-		std::cerr << "Usage: argentum <file>" << std::endl;
+	if (argc != 3) {
+		std::cerr << "Usage: argentum <file> <dump-file>" << std::endl;
 		return 1;
 	}
 
@@ -318,4 +394,8 @@ int main(int argc, char** argv)
 		std::cerr << "Failed to parse metainfo file" << std::endl;
 		return 1;
 	}
+
+	std::ofstream dumpfile {args[2]};
+	dumpfile.exceptions(dumpfile.badbit | dumpfile.failbit);
+	dump(dumpfile, *maybe_parsed);
 }
