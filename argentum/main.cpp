@@ -6,7 +6,9 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -84,55 +86,31 @@ namespace argentum {
 
 		struct node;
 
-		using list = gsl::span<node>;
+		using list = std::vector<node>;
 		using str = std::string_view;
 		using num = std::int64_t;
-
-		struct dict : std::pair<gsl::span<str>, gsl::span<node>> {
-			node* operator[](str key)
-			{
-				const auto base = first.begin();
-				const auto sentinel = first.end();
-				const auto maybe = std::find(base, sentinel, key);
-				if (maybe == sentinel)
-					return nullptr;
-
-				return &second[maybe - base];
-			}
-		};
+		using dict = std::unordered_map<std::string_view, node>;
 
 		struct node : std::variant<list, dict, num, str> {};
-
-		static_assert(std::is_trivially_destructible_v<node>);
-		static_assert(std::is_trivially_destructible_v<num>);
-		static_assert(std::is_trivially_destructible_v<str>);
-		static_assert(std::is_trivially_destructible_v<list>);
-		static_assert(std::is_trivially_destructible_v<dict>);
 
 		// Bencoding parser
 		// How will memory management work for the parse nodes?
 		// How often will we need to parse bencoding? It's not heavily involved in the peer protocol
+		// Two stacks -> one grows from caller to callee, one from callee to caller
+		// That way we can keep contiguous in-flight allocation, while still having persstent result allocation
 		class bparser {
 			using iterator = gsl::span<const char>::iterator;
 
 		public:
 			bparser() = default;
-
-			bparser(gsl::span<const char> data, std::size_t capacity) :
-				stack {capacity},
-				end {data.end()},
-				pos {data.begin()}
-			{
-			}
-
+			bparser(gsl::span<const char> data) noexcept : end {data.end()}, pos {data.begin()} {}
 			auto try_decode() noexcept { return any(); }
 
 		private:
-			stack_allocator stack {};
 			iterator end {};
 			iterator pos {};
 
-			template <typename type, type (bparser::*parse_rule)()>
+			template <typename type, std::optional<type> (bparser::*parse_rule)()>
 			auto attempt() noexcept
 			{
 				const auto backup = pos;
@@ -146,23 +124,23 @@ namespace argentum {
 			char peek() const noexcept { return pos != end ? *pos : '\0'; }
 
 			template <char c>
-			bool rule_symbol() noexcept
+			std::optional<std::monostate> rule_symbol() noexcept
 			{
 				if (peek() == c) {
 					++pos;
-					return true;
+					return std::monostate {};
 				}
 
-				return false;
+				return std::nullopt;
 			}
 
 			template <char c>
-			bool symbol() noexcept
+			auto symbol() noexcept
 			{
-				return attempt<bool, &bparser::rule_symbol<c>>();
+				return attempt<std::monostate, &bparser::rule_symbol<c>>();
 			}
 
-			sentinel_int rule_digits() noexcept
+			std::optional<num> rule_digits() noexcept
 			{
 				auto first_digit = true;
 				std::uint64_t value {};
@@ -178,101 +156,149 @@ namespace argentum {
 					value *= 10;
 					value += c - '0';
 					if (value < old)
-						return {};
+						return std::nullopt;
 				}
 
-				return first_digit ? sentinel_int {} : sentinel_int {gsl::narrow<std::int64_t>(value)};
+				if (first_digit)
+					return std::nullopt;
+
+				return gsl::narrow<std::int64_t>(value);
 			}
 
-			auto digits() noexcept { return attempt<sentinel_int, &bparser::rule_digits>(); }
+			auto digits() noexcept { return attempt<num, &bparser::rule_digits>(); }
 
-			sentinel_int rule_number() noexcept
+			std::optional<num> rule_number() noexcept
 			{
 				if (!symbol<'i'>())
 					return {};
 
 				const auto leading_zero = peek() == '0';
 				const auto is_negative = symbol<'-'>();
-				const auto value = digits();
-				if (!value)
-					return {};
+				auto maybe_value = digits();
+				if (!maybe_value)
+					return std::nullopt;
 
-				if (value.value == 0 && is_negative)
-					return {};
+				auto& value = *maybe_value;
+				if (value == 0 && is_negative)
+					return std::nullopt;
 
-				if (value.value != 0 && leading_zero)
-					return {};
+				if (value != 0 && leading_zero)
+					return std::nullopt;
 
 				if (!symbol<'e'>())
-					return {};
+					return std::nullopt;
 
-				return is_negative ? sentinel_int {-value.value} : value;
+				if (is_negative)
+					value = -value;
+
+				return maybe_value;
 			}
 
-			auto number() noexcept { return attempt<sentinel_int, &bparser::rule_number>(); }
+			auto number() noexcept { return attempt<num, &bparser::rule_number>(); }
 
-			bool rule_list() noexcept
+			std::optional<list> rule_list() noexcept
 			{
 				if (!symbol<'l'>())
-					return false;
+					return std::nullopt;
 
+				argentum::list nodes {};
 				while (true) {
-					if (!any())
+					auto maybe_node = any();
+					if (!maybe_node)
 						break;
+
+					nodes.emplace_back(std::move(*maybe_node));
 				}
 
 				if (!symbol<'e'>())
-					return false;
+					return std::nullopt;
 
-				return true;
+				return std::move(nodes);
 			}
 
-			bool list() noexcept { return attempt<bool, &bparser::rule_list>(); }
+			auto list() noexcept { return attempt<argentum::list, &bparser::rule_list>(); }
 
-			bool rule_dictionary() noexcept
+			std::optional<std::string_view> rule_string() noexcept
 			{
-				if (!symbol<'d'>())
-					return false;
+				const auto maybe_length = digits();
+				if (!maybe_length)
+					return std::nullopt;
 
-				// TODO: check for sorted keys
-				while (true) {
-					if (!string())
-						break;
-
-					if (!any())
-						return false;
-				}
-
-				if (!symbol<'e'>())
-					return false;
-
-				return true;
-			}
-
-			bool dictionary() noexcept { return attempt<bool, &bparser::rule_dictionary>(); }
-
-			bool rule_string() noexcept
-			{
-				const auto length = digits();
-				if (!length)
-					return false;
+				const auto length = *maybe_length;
+				if (length < 0)
+					return std::nullopt;
 
 				if (!symbol<':'>())
-					return false;
+					return std::nullopt;
 
-				if (end - pos < length.value)
-					return false;
+				if (end - pos < length)
+					return std::nullopt;
 
-				pos += length.value;
+				const auto start = &*pos;
+				pos += length;
 
-				return true;
+				return std::string_view {start, gsl::narrow<std::size_t>(length)};
 			}
 
-			bool string() noexcept { return attempt<bool, &bparser::rule_string>(); }
+			auto string() noexcept { return attempt<std::string_view, &bparser::rule_string>(); }
 
-			bool rule_any() noexcept { return number() || string() || list() || dictionary(); }
+			std::optional<dict> rule_dictionary() noexcept
+			{
+				if (!symbol<'d'>())
+					return std::nullopt;
 
-			bool any() noexcept { return attempt<bool, &bparser::rule_any>(); }
+				dict nodes {};
+				std::string_view last_key {};
+				auto is_first = true;
+				while (true) {
+					const auto maybe_key = string();
+					if (!maybe_key)
+						break;
+
+					const auto key = *maybe_key;
+					if (!is_first && last_key >= key)
+						return std::nullopt;
+
+					last_key = key;
+					is_first = false;
+
+					auto maybe_node = any();
+					if (!maybe_node)
+						return std::nullopt;
+
+					nodes.emplace(key, std::move(*maybe_node));
+				}
+
+				if (!symbol<'e'>())
+					return std::nullopt;
+
+				return std::move(nodes);
+			}
+
+			auto dictionary() noexcept { return attempt<dict, &bparser::rule_dictionary>(); }
+
+			std::optional<node> rule_any() noexcept
+			{
+				auto maybe_list = list();
+				if (maybe_list)
+					return std::make_optional<node>(std::move(*maybe_list));
+
+				auto maybe_dict = dictionary();
+				if (maybe_dict)
+					return std::make_optional<node>(std::move(*maybe_dict));
+
+				auto maybe_num = number();
+				if (maybe_num)
+					return std::make_optional<node>(std::move(*maybe_num));
+
+				auto maybe_str = string();
+				if (maybe_str)
+					return std::make_optional<node>(std::move(*maybe_str));
+
+				return std::nullopt;
+			}
+
+			std::optional<node> any() noexcept { return attempt<node, &bparser::rule_any>(); }
 		};
 	}
 }
@@ -286,7 +312,7 @@ int main(int argc, char** argv)
 	}
 
 	const auto metainfo_buffer = argentum::load_file(args[1]);
-	argentum::bparser parser {metainfo_buffer, 1024};
+	argentum::bparser parser {metainfo_buffer};
 	const auto maybe_parsed = parser.try_decode();
 	if (!maybe_parsed) {
 		std::cerr << "Failed to parse metainfo file" << std::endl;
