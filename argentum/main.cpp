@@ -158,7 +158,7 @@ namespace argentum {
 
 					const auto old = value;
 					value *= 10;
-					value += c - '0';
+					value += static_cast<num>(c) - '0';
 					if (value < old)
 						return std::nullopt;
 				}
@@ -246,7 +246,7 @@ namespace argentum {
 
 			auto string() noexcept { return attempt<std::string_view, &bparser::rule_string>(); }
 
-			std::optional<dict> rule_dictionary() noexcept
+			std::optional<dict> rule_dictionary()
 			{
 				if (!symbol<'d'>())
 					return std::nullopt;
@@ -281,7 +281,7 @@ namespace argentum {
 
 			auto dictionary() noexcept { return attempt<dict, &bparser::rule_dictionary>(); }
 
-			std::optional<node> rule_any() noexcept
+			std::optional<node> rule_any()
 			{
 				auto maybe_list = list();
 				if (maybe_list)
