@@ -1,6 +1,9 @@
+#define NOMINMAX
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -10,6 +13,7 @@
 #include <new>
 #include <optional>
 #include <ostream>
+#include <random>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -17,6 +21,8 @@
 #include <vector>
 
 #include <gsl/gsl>
+
+#include <WinSock2.h>
 
 namespace argentum {
 	namespace {
@@ -376,26 +382,265 @@ namespace argentum {
 
 			std::visit(visitor, n);
 		}
+
+		int dump_bencoding(gsl::span<gsl::zstring> args)
+		{
+			if (args.size() != 4) {
+				std::cerr << "Usage: argentum bencoding <file> <dump-file>" << std::endl;
+				return 1;
+			}
+
+			const auto metainfo_buffer = load_file(args[2]);
+			bparser parser {metainfo_buffer};
+			const auto maybe_parsed = parser.try_decode();
+			if (!maybe_parsed) {
+				std::cerr << "Failed to parse metainfo file" << std::endl;
+				return 1;
+			}
+
+			std::ofstream dumpfile {args[3]};
+			dumpfile.exceptions(dumpfile.badbit | dumpfile.failbit);
+			dump(dumpfile, *maybe_parsed);
+
+			return 0;
+		}
+
+		template <typename type>
+		auto pun(const void* ptr) noexcept
+		{
+			static_assert(std::is_trivial_v<type>);
+			return static_cast<type*>(ptr);
+		}
+
+		enum class rr_type : std::uint16_t {
+			a = 1,
+			ns = 2,
+			cname = 5,
+			soa = 6,
+			ptr = 12,
+		};
+
+		enum class rr_class : std::uint16_t {
+			in = 1,
+		};
+
+		enum class dns_op : std::uint8_t {
+
+		};
+
+		enum class dns_rcode : std::uint8_t {
+			none = 0,
+			format = 1,
+			server = 2,
+			name = 3,
+			unimplemented = 4,
+			refused = 5,
+		};
+
+		struct dns_flags {
+			bool is_response : 1;
+			dns_op opcode : 4;
+			bool is_authority : 1;
+			bool is_truncated : 1;
+			bool is_rec_wanted : 1;
+			bool is_rec_offered : 1;
+			std::uint8_t reserved : 3;
+			dns_rcode rcode : 4;
+		};
+
+		struct dns_header {
+			std::uint16_t id;
+			dns_flags flags;
+			std::uint16_t qdcount;
+			std::uint16_t ancount;
+			std::uint16_t nscount;
+			std::uint16_t arcount;
+		};
+
+		static_assert(sizeof(dns_flags) == 2);
+		static_assert(offsetof(dns_header, qdcount) == 4);
+
+		struct dns_question {
+			gsl::span<std::string_view> qname;
+			rr_type qtype;
+			rr_class qclass;
+		};
+
+		// Assuming you have only one question, of course...
+		std::size_t get_message_size(gsl::span<const std::string_view> qname)
+		{
+			auto query_bytes = sizeof(dns_header);
+			for (const auto label : qname) {
+				const auto length = gsl::narrow<std::uint8_t>(label.size());
+				query_bytes += length + 1;
+			}
+
+			query_bytes += sizeof(rr_type);
+			query_bytes += sizeof(rr_class);
+
+			return query_bytes;
+		}
+
+		struct buffer_writer {
+			std::vector<char> buffer;
+			std::size_t index;
+
+			buffer_writer(std::size_t capacity) : buffer(capacity), index {} {}
+
+			template <typename type, typename... pack_types>
+			[[gsl::suppress(r.3)]]
+			auto emplace(pack_types&&... pack)
+			{
+				Expects(buffer.size() - index >= sizeof(type));
+				const auto ptr = new (&gsl::at(buffer, index)) type {std::forward<pack_types>(pack)...};
+				index += sizeof(type);
+				return ptr;
+			}
+
+			auto domain(gsl::span<const std::string_view> name)
+			{
+				for (const auto label : name) {
+					Ensures(buffer.size() - index >= 1);
+					const auto length = gsl::narrow<std::uint8_t>(label.size());
+					emplace<std::uint8_t>(length);
+					if (length) {
+						Ensures(buffer.size() - index >= length);
+						std::memcpy(&gsl::at(buffer, index), label.data(), length);
+						index += length;
+					}
+				}
+			}
+
+			auto size() const noexcept { return buffer.size(); }
+			auto data() const noexcept { return buffer.data(); }
+
+			void check() const noexcept { Expects(index == buffer.size()); }
+		};
+
+		class socket_handle {
+		public:
+			socket_handle(SOCKET sock) noexcept : sock {sock} {}
+			socket_handle(socket_handle&) = default;
+			socket_handle(socket_handle&&) = default;
+			socket_handle& operator=(socket_handle&) = default;
+			socket_handle& operator=(socket_handle&&) = default;
+
+			~socket_handle() noexcept
+			{
+				if (sock != INVALID_SOCKET)
+					closesocket(sock);
+			}
+
+			operator SOCKET() const noexcept { return sock; }
+
+		private:
+			SOCKET sock {};
+		};
+
+		// Implied IN QCLASS (i.e. CLASS 1)
+		bool send_query(SOCKET sock, const sockaddr_in& addr, gsl::span<const std::string_view> qname, rr_type qtype)
+		{
+			Expects(qname.back().size() == 0);
+			const auto query_bytes = get_message_size(qname);
+			buffer_writer writer {query_bytes};
+
+			std::random_device device {};
+			std::uniform_int_distribution<std::uint16_t> dist {};
+			const auto header = writer.emplace<dns_header>();
+			header->id = htons(dist(device));
+			header->qdcount = htons(1);
+			writer.domain(qname);
+			writer.emplace<std::uint16_t>(htons(static_cast<std::uint16_t>(qtype)));
+			writer.emplace<std::uint16_t>(htons(static_cast<std::uint16_t>(rr_class::in)));
+
+			const auto result = sendto(
+				sock,
+				writer.data(),
+				gsl::narrow<int>(writer.size()),
+				0,
+				pun<const sockaddr>(&addr),
+				sizeof(addr));
+
+			return result != SOCKET_ERROR;
+		}
+
+		// How to maintain the NS records of the root zone?
+		// Or really, the authoritative records of any zone root?
+		int resolve_dns(gsl::span<gsl::zstring> args)
+		{
+			if (args.size() != 3) {
+				std::cerr << "Usage: argentum dns <domain>" << std::endl;
+				return 1;
+			}
+
+			const std::string_view fqdn {args[2]};
+			std::vector<std::string_view> domain {};
+			auto start = fqdn.begin();
+			const auto end = fqdn.end();
+			auto empty_labels = 0;
+			for (auto iter = start; iter != end; ++iter) {
+				if (*iter == '.') {
+					const std::string_view label {&*start, gsl::narrow_cast<std::size_t>(iter - start)};
+					if (label.empty())
+						++empty_labels;
+
+					domain.emplace_back(label);
+					start = iter;
+					++start;
+				}
+			}
+
+			if (start != end)
+				domain.emplace_back(&*start, end - start);
+
+			if (empty_labels == 0)
+				domain.emplace_back();
+			else if (empty_labels > 1)
+				std::cerr << "Not a valid FQDN" << std::endl;
+
+			for (auto label : domain)
+				std::cout << "> " << label << '\n';
+
+			std::cout << std::endl;
+
+			WSADATA wsa_data {};
+			if (WSAStartup(MAKEWORD(2, 2), &wsa_data))
+				return -1;
+
+			const auto cleanup = gsl::finally([]() noexcept { WSACleanup(); });
+			const socket_handle sock {socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)};
+			if (sock == INVALID_SOCKET)
+				return -1;
+
+			sockaddr_in address {};
+			address.sin_family = AF_INET;
+			// 198.41.0.4 (a.root-servers.net)
+			address.sin_addr.S_un.S_un_b.s_b1 = 198;
+			address.sin_addr.S_un.S_un_b.s_b2 = 41;
+			address.sin_addr.S_un.S_un_b.s_b3 = 0;
+			address.sin_addr.S_un.S_un_b.s_b4 = 4;
+			address.sin_port = htons(53);
+
+			if (!send_query(sock, address, domain, rr_type::ns)) {
+				std::cerr << "Failed to send DNS query" << std::endl;
+				return -1;
+			}
+
+			return 0;
+		}
 	}
 }
 
 int main(int argc, char** argv)
 {
 	const gsl::span args {argv, gsl::narrow_cast<std::size_t>(argc)};
-	if (argc != 3) {
-		std::cerr << "Usage: argentum <file> <dump-file>" << std::endl;
+	const std::string_view tool {argc >= 2 ? args[1] : ""};
+	if (tool == "bencoding")
+		return argentum::dump_bencoding(args);
+	else if (tool == "dns")
+		return argentum::resolve_dns(args);
+	else {
+		std::cerr << "Unrecognized tool" << std::endl;
 		return 1;
 	}
-
-	const auto metainfo_buffer = argentum::load_file(args[1]);
-	argentum::bparser parser {metainfo_buffer};
-	const auto maybe_parsed = parser.try_decode();
-	if (!maybe_parsed) {
-		std::cerr << "Failed to parse metainfo file" << std::endl;
-		return 1;
-	}
-
-	std::ofstream dumpfile {args[2]};
-	dumpfile.exceptions(dumpfile.badbit | dumpfile.failbit);
-	dump(dumpfile, *maybe_parsed);
 }
