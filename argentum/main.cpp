@@ -1,6 +1,7 @@
 #define NOMINMAX
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -537,7 +538,135 @@ namespace argentum {
 			SOCKET sock {};
 		};
 
+		class string_pool;
+
+		// Those comparisons are going to be awfully frequent...
+		class interned_string {
+			friend string_pool;
+
+		public:
+			std::string_view get() const noexcept
+			{
+				if (!storage)
+					return {};
+
+				return {&storage[1], gsl::narrow_cast<std::size_t>(storage[0])};
+			}
+
+		private:
+			// nullptr means empty string
+			char* storage;
+
+			interned_string(char* storage) noexcept : storage {storage} {}
+		};
+
+		// Use 1-byte length-prefixed strings without terminators. Matches the packet format.
+		// Wait... we will eventually have to free strings
+		class string_pool {
+			static constexpr auto chunk_size = 1024ull;
+			using chunk_type = std::array<char, chunk_size>;
+
+		public:
+		private:
+			std::vector<chunk_type> chunks {};
+			std::size_t top {};
+		};
+
+		/*
+		 * The fixed-size cache must support:
+		 * - Efficient lookup by domain name and QCLASS. Suggests a tree approach
+		 * - Efficient implementation of eviction policy (inclusive of non-record metadata)
+		 * - Efficient allocation of a new record (with attendant metadata)
+		 *
+		 * I'm thinking an opaque pool of records with efficient listing by TTL. Skip list?
+		 * No, there's a dynamic component to their ranking: time since last use.
+		 *
+		 * Wait wtf am I talking about... priority queue. Max heap. Multiple per ranking, of course.
+		 * - I.e. an array-based max heap of pointers into the cache. Every time a record is accessed, we bump it to the
+		 *		bottom of the heap
+		 * Ok, that solves the eviction problem. But how do we efficiently search the cache? And then update the max
+		 *heap? Heap pointers should be stored with the records.
+		 *
+		 * On top of this, pool-allocated nodes, arranged into a tree. Pretty sure this one can be refcounted pretty
+		 * easily.
+		 *
+		 * A good DNS resolver ought to be limited solely by network performance.
+		 *
+		 * Each tree node has a string-labelled hash table of children, and integer-labelled hash table (both flat maps)
+		 *of resource record types. The resource records themselves should be in a linked list.
+		 *
+		 * Should also probably segregate into authoritative and non-authoritative caches, no? In the sense of keeping
+		 * separate eviction heaps, record lists, etc?
+		 *
+		 * And how do we handle marking an evicted record pointer as stale? Doubly-linked list?
+		 *
+		 * Always have a last-used list for tree nodes, hash buckets, and records. Yes, many threads may be writing to
+		 * the same cache line, but the only time it ever gets read is if the item hasn't been touched in ages.
+		 */
+
+		/*
+		 * Alternative: a hash-keyed LRU cache (again, usign an eviction list), and an expiration heap. The hash is on
+		 * the domain and class, and gives a linked list of records.
+		 *
+		 * Domain labels are interned but heap-allocated (am unlikely to do better than the generic heap here). It may
+		 * be useful to "second-level" interning of domain names, or at least heap-allocate them as well.
+		 */
+
+		// Consider splitting this up into multiple components across parallel arrays. Its quite bulky and leads to poor
+		// cache efficiency.
+		struct dns_record {
+			dns_record* next;
+			std::uint32_t expiration; // UNIX time
+		};
+
+		struct dns_record_meta {
+			dns_record** pred; // In list head, this points to the flatmap entry. We opportunistically delete those
+							   // entries if we notice a null.
+
+			// Max heap
+			dns_record* left;
+			dns_record* right;
+		};
+
+		// How well can a flat map perform at very high load factors, you think?
+		// What if no probing? What if we just evict on collision?
+		template <typename key_type, typename value_type, key_type tombstone, key_type empty>
+		class flat_map {
+		public:
+			flat_map(std::size_t power) : keys(1 << power), values(1 << power), mask {(1 << power) - 1} {}
+
+			value_type* try_insert(key_type k, value_type v)
+			{
+				Expects(k != tombstone);
+				std::hash<key_type> hasher {};
+				auto hash = hasher(k);
+				while (true) {
+					const auto idx = hash & mask;
+					auto& k = keys[idx];
+					if (k == tombstone || k == empty)
+						return &values[idx];
+
+					++hash;
+				}
+			}
+
+		private:
+			std::vector<key_type> keys {};
+			std::vector<value_type> values {};
+			std::size_t mask {};
+		};
+
+		struct dns_node {
+			// For lack of a better allocation strategy
+			std::string label;
+			std::vector<dns_node*> children;
+			std::vector<void*> records; // In general, a node should be freed as soon as it has no cached records
+		};
+
 		// Implied IN QCLASS (i.e. CLASS 1)
+		// In future, we'd want to batch multiple queries to the same server into the same message
+		// ... modulo truncation, of course. Chief reason to avoid TCP is to avoid the connection setup / teardown
+		// overhead
 		bool send_query(SOCKET sock, const sockaddr_in& addr, gsl::span<const std::string_view> qname, rr_type qtype)
 		{
 			Expects(qname.back().size() == 0);
