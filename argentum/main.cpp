@@ -538,129 +538,121 @@ namespace argentum {
 			SOCKET sock {};
 		};
 
-		class string_pool;
+		struct record {
+			record* next;
+			record* prev;
+		};
 
-		// Those comparisons are going to be awfully frequent...
-		class interned_string {
-			friend string_pool;
-
-		public:
-			std::string_view get() const noexcept
-			{
-				if (!storage)
-					return {};
-
-				return {&storage[1], gsl::narrow_cast<std::size_t>(storage[0])};
+		void insert_after(record*& list, record& node)
+		{
+			if (!list) {
+				list = &node;
+				node.next = list;
+				node.prev = list;
+				return;
 			}
 
-		private:
-			// nullptr means empty string
-			char* storage;
+			node.prev = list;
+			node.next = list->next;
+			list->next = &node;
+		}
 
-			interned_string(char* storage) noexcept : storage {storage} {}
+		struct record_list {
+			record* head;
+			std::size_t length;
 		};
 
-		// Use 1-byte length-prefixed strings without terminators. Matches the packet format.
-		// Wait... we will eventually have to free strings
-		class string_pool {
-			static constexpr auto chunk_size = 1024ull;
-			using chunk_type = std::array<char, chunk_size>;
-
+		class record_cache {
 		public:
-		private:
-			std::vector<chunk_type> chunks {};
-			std::size_t top {};
-		};
-
-		/*
-		 * The fixed-size cache must support:
-		 * - Efficient lookup by domain name and QCLASS. Suggests a tree approach
-		 * - Efficient implementation of eviction policy (inclusive of non-record metadata)
-		 * - Efficient allocation of a new record (with attendant metadata)
-		 *
-		 * I'm thinking an opaque pool of records with efficient listing by TTL. Skip list?
-		 * No, there's a dynamic component to their ranking: time since last use.
-		 *
-		 * Wait wtf am I talking about... priority queue. Max heap. Multiple per ranking, of course.
-		 * - I.e. an array-based max heap of pointers into the cache. Every time a record is accessed, we bump it to the
-		 *		bottom of the heap
-		 * Ok, that solves the eviction problem. But how do we efficiently search the cache? And then update the max
-		 *heap? Heap pointers should be stored with the records.
-		 *
-		 * On top of this, pool-allocated nodes, arranged into a tree. Pretty sure this one can be refcounted pretty
-		 * easily.
-		 *
-		 * A good DNS resolver ought to be limited solely by network performance.
-		 *
-		 * Each tree node has a string-labelled hash table of children, and integer-labelled hash table (both flat maps)
-		 *of resource record types. The resource records themselves should be in a linked list.
-		 *
-		 * Should also probably segregate into authoritative and non-authoritative caches, no? In the sense of keeping
-		 * separate eviction heaps, record lists, etc?
-		 *
-		 * And how do we handle marking an evicted record pointer as stale? Doubly-linked list?
-		 *
-		 * Always have a last-used list for tree nodes, hash buckets, and records. Yes, many threads may be writing to
-		 * the same cache line, but the only time it ever gets read is if the item hasn't been touched in ages.
-		 */
-
-		/*
-		 * Alternative: a hash-keyed LRU cache (again, usign an eviction list), and an expiration heap. The hash is on
-		 * the domain and class, and gives a linked list of records.
-		 *
-		 * Domain labels are interned but heap-allocated (am unlikely to do better than the generic heap here). It may
-		 * be useful to "second-level" interning of domain names, or at least heap-allocate them as well.
-		 */
-
-		// Consider splitting this up into multiple components across parallel arrays. Its quite bulky and leads to poor
-		// cache efficiency.
-		struct dns_record {
-			dns_record* next;
-			std::uint32_t expiration; // UNIX time
-		};
-
-		struct dns_record_meta {
-			dns_record** pred; // In list head, this points to the flatmap entry. We opportunistically delete those
-							   // entries if we notice a null.
-
-			// Max heap
-			dns_record* left;
-			dns_record* right;
-		};
-
-		// How well can a flat map perform at very high load factors, you think?
-		// What if no probing? What if we just evict on collision?
-		template <typename key_type, typename value_type, key_type tombstone, key_type empty>
-		class flat_map {
-		public:
-			flat_map(std::size_t power) : keys(1 << power), values(1 << power), mask {(1 << power) - 1} {}
-
-			value_type* try_insert(key_type k, value_type v)
+			record_cache(std::size_t capacity) : candidates {}, pool {}
 			{
-				Expects(k != tombstone);
-				std::hash<key_type> hasher {};
-				auto hash = hasher(k);
-				while (true) {
-					const auto idx = hash & mask;
-					auto& k = keys[idx];
-					if (k == tombstone || k == empty)
-						return &values[idx];
+				auto& head = candidates.head;
+				for (auto& item : pool) {
+					insert_after(head, item);
+					head = &item;
+				}
 
-					++hash;
+				candidates.length = capacity;
+			};
+
+			// Each table entry is the sentinel of a separate circular linked list
+			// Separately, each node is in a linked list for eviction priority
+			// This allows transparently splicing them out.
+			// But how do you handle them being spliced out from under you?
+			// Need to be able to hold a lock on an individual node
+			// Might be a good use-case for shared_ptr if you have to heap allocate the resource anyways
+			// wait... if you have to heap-allocate anyways, why not just have a hash table to a shared_ptr?
+			// Well... because you still need to chain records together in lists.
+			// The lazy way to achieve this is with a fixed-size query cache
+			// But that makes individual record eviction an expensive proposition.
+			// And it is very difficult to bound overall memory usage.
+
+			// Exactly how large will the average RR set get?
+
+			// Should be O(count), considering the average record set is pretty small per request
+			// General idea: extract a range and move the list up to avoid contention
+			// MUST consider the case of what happens if a record is evicted in transit
+			record_list allocate(std::size_t count) noexcept
+			{
+				const auto size = std::min(candidates.length, count);
+				if (!size)
+					return {};
+
+				if (size >= candidates.length) {
+					const auto copy = candidates;
+					candidates = {};
+					return copy;
+				}
+
+				record_list allocation {candidates.head, size};
+				auto new_head = allocation.head;
+				for (auto i = 0ull; i < size; ++i)
+					new_head = new_head->next;
+
+				auto new_tail = candidates.head->prev;
+				auto alloc_head = allocation.head;
+				auto alloc_tail = new_head->prev;
+				alloc_head->prev = alloc_tail;
+				alloc_tail->next = alloc_head;
+				new_head->prev = new_tail;
+				new_tail->next = new_head;
+				allocation.head = alloc_head;
+				candidates.head = new_head;
+				candidates.length -= size;
+
+				return allocation;
+			}
+
+			// Unsafe to use evicted list afterward.
+			// It is expected that the nodes of the evicted list have previously been spliced out
+			// Or maybe single-node eviction since we're splicing anyways?
+			// General idea: splice out a single node and move it to list head
+			void evict(const record_list& evicted)
+			{
+				if (evicted.length) {
+					const auto evict_head = evicted.head;
+					const auto evict_tail = evict_head->prev;
+					const auto head = candidates.head;
+					const auto tail = head->prev;
+					evict_tail->next = head;
+					head->prev = evict_tail;
+					tail->next = evict_head;
+					evict_head->prev = tail;
+					candidates.head = evict_head;
+					candidates.length += evicted.length;
 				}
 			}
 
-		private:
-			std::vector<key_type> keys {};
-			std::vector<value_type> values {};
-			std::size_t mask {};
-		};
+			// General idea: splice out a range of nodes from their current place and move to list tail
+			void touch(record* head, record* tail)
+			{
+				static_cast<void>(head);
+				static_cast<void>(tail);
+			}
 
-		struct dns_node {
-			// For lack of a better allocation strategy
-			std::string label;
-			std::vector<dns_node*> children;
-			std::vector<void*> records; // In general, a node should be freed as soon as it has no cached records
+		private:
+			record_list candidates {};
+			std::vector<record> pool {};
 		};
 
 		// Implied IN QCLASS (i.e. CLASS 1)
