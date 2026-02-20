@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -539,120 +540,71 @@ namespace argentum {
 		};
 
 		struct record {
-			record* next;
-			record* prev;
+			std::shared_ptr<record*> next;
+			std::chrono::system_clock::time_point expiry;
+			gsl::span<const char> data;
 		};
 
-		void insert_after(record*& list, record& node)
-		{
-			if (!list) {
-				list = &node;
-				node.next = list;
-				node.prev = list;
-				return;
+		class query_cache {
+			// Doesn't need to always own.
+			// Why not just have interned labels and interned domain names?
+			using key = std::pair<std::vector<std::string_view>, rr_type>;
+
+		public:
+			query_cache() = default;
+
+			query_cache(std::size_t power) : query_cache {}
+			{
+				Expects(power < 32);
+				const auto size = 1ull << power;
+				mask = size - 1;
+				keys.resize(size);
+				values.resize(size);
 			}
 
-			node.prev = list;
-			node.next = list->next;
-			list->next = &node;
-		}
-
-		struct record_list {
-			record* head;
-			std::size_t length;
-		};
-
-		class record_cache {
-		public:
-			record_cache(std::size_t capacity) : candidates {}, pool {}
+			std::shared_ptr<record*> operator[](const key& query) noexcept
 			{
-				auto& head = candidates.head;
-				for (auto& item : pool) {
-					insert_after(head, item);
-					head = &item;
-				}
-
-				candidates.length = capacity;
-			};
-
-			// Each table entry is the sentinel of a separate circular linked list
-			// Separately, each node is in a linked list for eviction priority
-			// This allows transparently splicing them out.
-			// But how do you handle them being spliced out from under you?
-			// Need to be able to hold a lock on an individual node
-			// Might be a good use-case for shared_ptr if you have to heap allocate the resource anyways
-			// wait... if you have to heap-allocate anyways, why not just have a hash table to a shared_ptr?
-			// Well... because you still need to chain records together in lists.
-			// The lazy way to achieve this is with a fixed-size query cache
-			// But that makes individual record eviction an expensive proposition.
-			// And it is very difficult to bound overall memory usage.
-
-			// Exactly how large will the average RR set get?
-
-			// Should be O(count), considering the average record set is pretty small per request
-			// General idea: extract a range and move the list up to avoid contention
-			// MUST consider the case of what happens if a record is evicted in transit
-			record_list allocate(std::size_t count) noexcept
-			{
-				const auto size = std::min(candidates.length, count);
-				if (!size)
+				const auto index = hash(query);
+				if (gsl::at(keys, index) != query)
 					return {};
 
-				if (size >= candidates.length) {
-					const auto copy = candidates;
-					candidates = {};
-					return copy;
-				}
-
-				record_list allocation {candidates.head, size};
-				auto new_head = allocation.head;
-				for (auto i = 0ull; i < size; ++i)
-					new_head = new_head->next;
-
-				auto new_tail = candidates.head->prev;
-				auto alloc_head = allocation.head;
-				auto alloc_tail = new_head->prev;
-				alloc_head->prev = alloc_tail;
-				alloc_tail->next = alloc_head;
-				new_head->prev = new_tail;
-				new_tail->next = new_head;
-				allocation.head = alloc_head;
-				candidates.head = new_head;
-				candidates.length -= size;
-
-				return allocation;
+				return gsl::at(values, index);
 			}
 
-			// Unsafe to use evicted list afterward.
-			// It is expected that the nodes of the evicted list have previously been spliced out
-			// Or maybe single-node eviction since we're splicing anyways?
-			// General idea: splice out a single node and move it to list head
-			void evict(const record_list& evicted)
+			std::shared_ptr<record*>& insert_at(key query) noexcept
 			{
-				if (evicted.length) {
-					const auto evict_head = evicted.head;
-					const auto evict_tail = evict_head->prev;
-					const auto head = candidates.head;
-					const auto tail = head->prev;
-					evict_tail->next = head;
-					head->prev = evict_tail;
-					tail->next = evict_head;
-					evict_head->prev = tail;
-					candidates.head = evict_head;
-					candidates.length += evicted.length;
+				const auto index = hash(query);
+				auto& key = gsl::at(keys, index);
+				auto& value = gsl::at(values, index);
+				// NOT THREAD SAFE
+				if (key != query) {
+					key = query;
+					value.reset();
 				}
-			}
 
-			// General idea: splice out a range of nodes from their current place and move to list tail
-			void touch(record* head, record* tail)
-			{
-				static_cast<void>(head);
-				static_cast<void>(tail);
+				return value;
 			}
 
 		private:
-			record_list candidates {};
-			std::vector<record> pool {};
+			std::vector<key> keys {};
+			std::vector<std::shared_ptr<record*>> values {};
+			std::size_t mask {};
+
+			std::uint32_t hash(const key& query) noexcept
+			{
+				std::uint32_t crc32 {0xffffffff};
+				crc32 = gsl::narrow_cast<std::uint32_t>(_mm_crc32_u64(crc32, query.first.size()));
+				for (auto label : query.first) {
+					crc32 = gsl::narrow_cast<std::uint32_t>(_mm_crc32_u64(crc32, label.size()));
+					for (auto ch : label) {
+						crc32 = _mm_crc32_u8(crc32, ch);
+					}
+				}
+
+				crc32 = _mm_crc32_u16(crc32, static_cast<std::uint16_t>(query.second));
+
+				return crc32 & mask;
+			}
 		};
 
 		// Implied IN QCLASS (i.e. CLASS 1)
