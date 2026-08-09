@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -25,6 +26,8 @@
 #include <gsl/gsl>
 
 #include <WinSock2.h>
+
+#include <WS2tcpip.h>
 
 namespace argentum {
 	namespace {
@@ -701,6 +704,144 @@ namespace argentum {
 
 			return 0;
 		}
+
+		class ws2_socket {
+		public:
+			ws2_socket() = default;
+
+			ws2_socket(SOCKET sock) noexcept : sock {sock} {}
+			ws2_socket(ws2_socket&) = delete;
+			ws2_socket(ws2_socket&& other) noexcept : sock {other.sock} { other.sock = INVALID_SOCKET; };
+			ws2_socket& operator=(ws2_socket&) = delete;
+
+			ws2_socket& operator=(ws2_socket&& other) noexcept
+			{
+				sock = other.sock;
+				other.sock = INVALID_SOCKET;
+			}
+
+			~ws2_socket() noexcept
+			{
+				if (sock != INVALID_SOCKET)
+					closesocket(sock);
+			}
+
+			bool is_valid() const noexcept { return sock != INVALID_SOCKET; }
+
+			SOCKET get() const noexcept { return sock; }
+
+			bool try_shutdown() const noexcept
+			{
+				if (shutdown(sock, SD_SEND) == SOCKET_ERROR) {
+					std::cerr << "[-] Bad shutdown (" << WSAGetLastError() << ")" << std::endl;
+					return false;
+				}
+
+				while (true) {
+					std::array<char, 128> buffer {};
+					const auto flushed = recv(sock, buffer.data(), gsl::narrow_cast<int>(buffer.size()), 0);
+					if (flushed > 0)
+						std::cerr << "[*] Flushed " << flushed << " bytes" << std::endl;
+					else if (flushed < 0) {
+						std::cerr << "[-] Bad recv (" << WSAGetLastError() << ")" << std::endl;
+						return false;
+					}
+					else {
+						std::cerr << "[+] Flushed socket" << std::endl;
+						return true;
+					}
+				}
+			}
+
+		private:
+			SOCKET sock {INVALID_SOCKET};
+		};
+
+		class winsock2 {
+		public:
+			struct tag {};
+
+			winsock2() = default;
+
+			winsock2(tag) : winsock2 {}
+			{
+				if (WSAStartup(MAKEWORD(2, 2), &wsa_data))
+					throw std::runtime_error {std::format("WSAGetLastError(): {}", WSAGetLastError())};
+
+				initialized = true;
+			}
+
+			winsock2(winsock2&) = delete;
+
+			winsock2(winsock2&& other) noexcept : wsa_data {other.wsa_data}, initialized {true}
+			{
+				other.initialized = false;
+			}
+
+			winsock2& operator=(winsock2&) = delete;
+
+			winsock2& operator=(winsock2&& other) noexcept
+			{
+				Expects(!initialized);
+				wsa_data = other.wsa_data;
+				initialized = true;
+			}
+
+			~winsock2() noexcept
+			{
+				if (initialized)
+					WSACleanup();
+			}
+
+			ws2_socket socket(int af, int type, int proto) const noexcept { return {::socket(af, type, proto)}; }
+
+		private:
+			WSADATA wsa_data {};
+			bool initialized {};
+		};
+
+		int trace_tls(gsl::span<gsl::zstring> args)
+		{
+			if (args.size() < 3) {
+				std::cerr << "Usage: argentum tls <hostname> [<port>]" << std::endl;
+				return 1;
+			}
+
+			const auto port = args.size() < 4 ? "443" : args[3];
+			winsock2 ws2 {{}};
+
+			ADDRINFOA hints {};
+			hints.ai_family = AF_UNSPEC;
+			ADDRINFOA* result {};
+			if (const auto err = getaddrinfo(args[2], port, &hints, &result); err) {
+				std::cerr << "[-] Bad getaddrinfo (" << err << ")" << std::endl;
+				return 1;
+			}
+
+			if (!result) {
+				std::cerr << "[-] No results from DNS" << std::endl;
+				return 1;
+			}
+
+			const auto free_info = gsl::finally([result]() noexcept { freeaddrinfo(result); });
+			const auto sock = ws2.socket(result->ai_family, SOCK_STREAM, IPPROTO_TCP);
+			if (!sock.is_valid()) {
+				std::cerr << "[-] Bad socket (" << WSAGetLastError() << ")" << std::endl;
+				return 1;
+			}
+
+			if (connect(sock.get(), result->ai_addr, gsl::narrow<int>(result->ai_addrlen)) == SOCKET_ERROR) {
+				std::cerr << "[-] Bad connect (" << WSAGetLastError() << ")" << std::endl;
+				return 1;
+			}
+
+			if (!sock.try_shutdown()) {
+				std::cerr << "[-] Did not shut down gracefully" << std::endl;
+				return 1;
+			}
+
+			return 0;
+		}
 	}
 }
 
@@ -712,6 +853,8 @@ int main(int argc, char** argv)
 		return argentum::dump_bencoding(args);
 	else if (tool == "dns")
 		return argentum::resolve_dns(args);
+	else if (tool == "tls")
+		return argentum::trace_tls(args);
 	else {
 		std::cerr << "Unrecognized tool" << std::endl;
 		return 1;
