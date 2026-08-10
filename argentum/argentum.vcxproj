@@ -151,9 +151,16 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="tls_1_3.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="dump.json" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="tls_1_3.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="test.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
