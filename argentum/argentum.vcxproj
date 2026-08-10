@@ -157,6 +157,7 @@
     <None Include="dump.json" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="rijndael.h" />
     <ClInclude Include="tls_1_3.h" />
   </ItemGroup>
   <ItemGroup>

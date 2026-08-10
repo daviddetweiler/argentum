@@ -12,8 +12,9 @@
 
 #include <WS2tcpip.h>
 
-namespace argentum {
+#include "rijndael.h"
 
+namespace argentum {
 	class ws2_socket {
 	public:
 		ws2_socket() = default;
@@ -167,7 +168,7 @@ namespace argentum {
 		} ClientHello;
 
 		If a client declares TLS 1.3 in its hello, but sends anything other than the null compression method, the server
-	    is required to reject it. However, if a client declares 1.2, and the server does not intend to reject it, it
+		is required to reject it. However, if a client declares 1.2, and the server does not intend to reject it, it
 		must treat this field as defined in 1.2.
 	*/
 

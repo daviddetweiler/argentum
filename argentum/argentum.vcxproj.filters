@@ -29,6 +29,9 @@
     <ClInclude Include="tls_1_3.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="rijndael.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Text Include="test.txt" />
