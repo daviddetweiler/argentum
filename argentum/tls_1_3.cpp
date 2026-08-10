@@ -118,8 +118,7 @@ namespace argentum::sha256 {
 	void hash(digest d, gsl::span<const char> content)
 	{
 		auto state = first_hash;
-		const auto total_size = (block_bytes - ((content.size() + 1) % block_bytes)) % block_bytes;
-		for (auto i = 0; i < total_size; i += block_bytes) {
+		for (auto i = 0;; i += block_bytes) {
 			const auto block_end = std::min(content.size(), gsl::narrow_cast<std::size_t>(i + block_bytes));
 			const auto psize = block_end - i;
 			const auto next_block = content.subspan(i, psize);
@@ -142,6 +141,8 @@ namespace argentum::sha256 {
 				hash_block(state, span.subspan<0, block_bytes>());
 				if (padded_len > block_bytes)
 					hash_block(state, span.subspan<block_bytes, block_bytes>());
+
+				break;
 			}
 		}
 
