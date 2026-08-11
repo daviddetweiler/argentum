@@ -8,7 +8,7 @@
 
 #include <gsl/gsl>
 
-namespace tls_1_3::rijndael {
+namespace argentum::rijndael {
 	namespace {
 		using t_table = std::array<std::uint32_t, 256>;
 		using u_op = std::array<std::uint8_t, 256>;
@@ -56,7 +56,7 @@ namespace tls_1_3::rijndael {
 			t_tables inverse_round;
 
 			[[gsl::suppress(bounds)]] //
-			[[gsl::suppress(f .6)]] //
+			[[gsl::suppress(f.6)]] //
 			inline constant_table() :
 				round_constants {},
 				sbox {},
@@ -189,8 +189,7 @@ namespace tls_1_3::rijndael {
 			static constexpr auto rotate_word(std::uint32_t c) { return c >> 8 | c << 24; }
 
 			[[gsl::suppress(bounds)]] //
-			static constexpr auto
-			sub_word(const constant_table& table, std::uint32_t c)
+			static constexpr auto sub_word(const constant_table& table, std::uint32_t c)
 			{
 				const auto& sbox = table.sbox;
 				const auto x = sbox[c & 0xff];
@@ -202,8 +201,7 @@ namespace tls_1_3::rijndael {
 
 			[[gsl::suppress(bounds)]] //
 			[[gsl::suppress(gsl.view)]] //
-			inline void
-			apply_key_schedule(const constant_table& table) noexcept
+			inline void apply_key_schedule(const constant_table& table) noexcept
 			{
 				const std::span key_view {keys};
 				for (auto j = nk; j < n_key_words; ++j) {
@@ -230,8 +228,7 @@ namespace tls_1_3::rijndael {
 			template <bool inverted>
 			[[gsl::suppress(bounds)]] //
 			[[gsl::suppress(gsl.view)]] //
-			void
-			apply_rounds(const constant_table& table, block_view state) const noexcept
+			void apply_rounds(const constant_table& table, block_view state) const noexcept
 			{
 				const std::span key_view {inverted ? inverse_keys : keys};
 				const auto offset = [](unsigned int r) { return (inverted ? n_rounds - r : r) * block_size; };

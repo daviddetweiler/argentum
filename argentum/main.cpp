@@ -32,8 +32,8 @@ namespace argentum {
 		struct sentinel_int {
 			std::int64_t value;
 
-			sentinel_int() noexcept : value {std::numeric_limits<std::int64_t>::max()} {};
-			sentinel_int(std::int64_t v) noexcept : value {v} {}
+			sentinel_int() noexcept : value {std::numeric_limits<std::int64_t>::max()} { };
+			sentinel_int(std::int64_t v) noexcept : value {v} { }
 			operator std::int64_t() const noexcept { return value; }
 			operator bool() const noexcept { return value != std::numeric_limits<std::int64_t>::max(); }
 		};
@@ -52,10 +52,10 @@ namespace argentum {
 		class stack_allocator {
 		public:
 			stack_allocator() = default;
-			stack_allocator(std::size_t capacity) : buffer(capacity) {}
+			stack_allocator(std::size_t capacity) : buffer(capacity) { }
 
 			template <typename type, typename... pack_types>
-			type* try_allocate(pack_types&&... pack) noexcept(new(std::declval<void*>())
+			type* try_allocate(pack_types&&... pack) noexcept(new (std::declval<void*>())
 																  type {std::declval<decltype(pack)>()})
 			{
 				const auto attempt = try_many<type>(1);
@@ -104,7 +104,7 @@ namespace argentum {
 		using num = std::int64_t;
 		using dict = std::map<std::string_view, node>;
 
-		struct node : std::variant<list, dict, num, str> {};
+		struct node : std::variant<list, dict, num, str> { };
 
 		// Bencoding parser
 		// How will memory management work for the parse nodes?
@@ -116,7 +116,7 @@ namespace argentum {
 
 		public:
 			bparser() = default;
-			bparser(gsl::span<const char> data) noexcept : end {data.end()}, pos {data.begin()} {}
+			bparser(gsl::span<const char> data) noexcept : end {data.end()}, pos {data.begin()} { }
 			auto try_decode() noexcept { return any(); }
 
 		private:
@@ -470,12 +470,12 @@ namespace argentum {
 		};
 
 		// Assuming you have only one question, of course...
-		std::size_t get_message_size(gsl::span<const std::string_view> qname)
+		constexpr std::size_t get_message_size(gsl::span<const std::string_view> qname)
 		{
 			auto query_bytes = sizeof(dns_header);
 			for (const auto label : qname) {
 				const auto length = gsl::narrow<std::uint8_t>(label.size());
-				query_bytes += length + 1;
+				query_bytes += length + 1ull;
 			}
 
 			query_bytes += sizeof(rr_type);
@@ -488,7 +488,7 @@ namespace argentum {
 			std::vector<char> buffer;
 			std::size_t index;
 
-			buffer_writer(std::size_t capacity) : buffer(capacity), index {} {}
+			buffer_writer(std::size_t capacity) : buffer(capacity), index {} { }
 
 			template <typename type, typename... pack_types>
 			[[gsl::suppress(r.3)]]
@@ -522,7 +522,7 @@ namespace argentum {
 
 		class socket_handle {
 		public:
-			socket_handle(SOCKET sock) noexcept : sock {sock} {}
+			socket_handle(SOCKET sock) noexcept : sock {sock} { }
 			socket_handle(socket_handle&) = default;
 			socket_handle(socket_handle&&) = default;
 			socket_handle& operator=(socket_handle&) = default;
@@ -751,6 +751,15 @@ namespace argentum {
 			return 0;
 		}
 
+		void dump32(gsl::span<const std::uint8_t> data)
+		{
+			for (auto i = 0; i < data.size(); ++i) {
+				std::cout << std::format("{:02x}", gsl::at(data, i));
+				if (i % 4 == 3)
+					std::cout << ' ';
+			}
+		}
+
 		int sha256_hash(gsl::span<gsl::zstring> args)
 		{
 			if (args.size() < 3) {
@@ -759,14 +768,49 @@ namespace argentum {
 			}
 
 			const auto blob = load_file(args[2]);
-			std::array<char, 32> d {};
-			sha256::hash(d, blob);
+			std::array<std::uint8_t, 32> d {};
+			sha256::stomach digester {};
+			digester.init();
+			digester.append(gsl::span {to_uint8_tp(blob.data()), blob.size()});
+			digester.complete(d);
+			dump32(d);
 
-			for (auto i = 0; i < d.size(); ++i) {
-				std::cout << std::format("{:02x}", gsl::at(d, i));
-				if (i % 4 == 3)
-					std::cout << ' ';
+			return 0;
+		}
+
+		int aes256_transcode(gsl::span<gsl::zstring> args)
+		{
+			if (args.size() < 6) {
+				std::cerr << "Usage: argentum aes256 <keyfile> encrypt|decrypt <plaintext>|<ciphertext> <out>" << std::endl;
+				return 1;
 			}
+
+			const std::string_view operation {args[3]};
+			auto should_decrypt = false;
+			if (operation == "encrypt") { }
+			else if (operation == "decrypt") {
+				should_decrypt = true;
+			}
+			else {
+				std::cerr << "Usage: argentum aes256 <keyfile> encrypt|decrypt <plaintext>|<ciphertext> <out>" << std::endl;
+				return 1;
+			}
+
+			using cipher = rijndael::aes256;
+
+			const auto keyfile = load_file(args[2]);
+			std::array<std::uint8_t, cipher::key_size> key {};
+			sha256::stomach digester {};
+			digester.init();
+			digester.append(gsl::span {to_uint8_tp(keyfile.data()), keyfile.size()});
+			digester.complete(key);
+			std::cerr << "Using key: ";
+			dump32(key);
+			std::cerr << std::endl;
+
+			const auto source = load_file(args[4]);
+			const rijndael::constant_table constants {};
+			const cipher transcoder {constants, key};
 
 			return 0;
 		}
@@ -785,6 +829,8 @@ int main(int argc, char** argv)
 		return argentum::trace_tls(args);
 	else if (tool == "sha256")
 		return argentum::sha256_hash(args);
+	else if (tool == "aes256")
+		return argentum::aes256_transcode(args);
 	else {
 		std::cerr << "Unrecognized tool" << std::endl;
 		return 1;

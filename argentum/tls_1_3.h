@@ -1,8 +1,8 @@
 #pragma once
 
+#define NOMINMAX
+
 #include <array>
-#include <cstddef>
-#include <cstdint>
 #include <format>
 #include <iostream>
 
@@ -13,13 +13,14 @@
 #include <WS2tcpip.h>
 
 #include "rijndael.h"
+#include "sha256.h"
 
 namespace argentum {
 	class ws2_socket {
 	public:
 		ws2_socket() = default;
 
-		ws2_socket(SOCKET sock) noexcept : sock {sock} {}
+		ws2_socket(SOCKET sock) noexcept : sock {sock} { }
 		ws2_socket(ws2_socket&) = delete;
 		ws2_socket(ws2_socket&& other) noexcept : sock {other.sock} { other.sock = INVALID_SOCKET; };
 		ws2_socket& operator=(ws2_socket&) = delete;
@@ -84,7 +85,7 @@ namespace argentum {
 
 	class winsock2 {
 	public:
-		struct tag {};
+		struct tag { };
 
 		winsock2() = default;
 
@@ -144,7 +145,7 @@ namespace argentum {
 	template <std::size_t capacity>
 	class serializer {
 	public:
-		serializer(const ws2_socket& sock) : sock {sock}, buffer {} {}
+		serializer(const ws2_socket& sock) : sock {sock}, buffer {} { }
 
 	private:
 		const ws2_socket& sock {};
@@ -179,10 +180,4 @@ namespace argentum {
 		- SHA256 hashing
 		- AES-GCM encryption
 	*/
-
-	namespace sha256 {
-		using digest = gsl::span<char, 256 / 8>;
-
-		void hash(digest d, gsl::span<const char> content);
-	}
 }

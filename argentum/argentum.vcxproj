@@ -153,6 +153,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="sha256.cpp" />
     <ClCompile Include="tls_1_3.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -160,6 +161,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="rijndael.h" />
+    <ClInclude Include="sha256.h" />
     <ClInclude Include="tls_1_3.h" />
   </ItemGroup>
   <ItemGroup>
