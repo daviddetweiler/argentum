@@ -760,6 +760,12 @@ namespace argentum {
 			}
 		}
 
+		template <typename type, std::size_t extent>
+		gsl::span<const unsigned char> as_uchars(gsl::span<type, extent> span)
+		{
+			return {to_uint8_tp(span.data()), span.size_bytes()};
+		}
+
 		int sha256_hash(gsl::span<gsl::zstring> args)
 		{
 			if (args.size() < 3) {
@@ -780,19 +786,9 @@ namespace argentum {
 
 		int aes256_transcode(gsl::span<gsl::zstring> args)
 		{
-			if (args.size() < 6) {
-				std::cerr << "Usage: argentum aes256 <keyfile> encrypt|decrypt <plaintext>|<ciphertext> <out>" << std::endl;
-				return 1;
-			}
-
-			const std::string_view operation {args[3]};
-			auto should_decrypt = false;
-			if (operation == "encrypt") { }
-			else if (operation == "decrypt") {
-				should_decrypt = true;
-			}
-			else {
-				std::cerr << "Usage: argentum aes256 <keyfile> encrypt|decrypt <plaintext>|<ciphertext> <out>" << std::endl;
+			if (args.size() < 5) {
+				std::cerr << "Usage: argentum aes256-ctr <keyfile> <in> <out>"
+						  << std::endl;
 				return 1;
 			}
 
@@ -802,15 +798,35 @@ namespace argentum {
 			std::array<std::uint8_t, cipher::key_size> key {};
 			sha256::stomach digester {};
 			digester.init();
-			digester.append(gsl::span {to_uint8_tp(keyfile.data()), keyfile.size()});
+			digester.append(as_uchars(gsl::span {keyfile}));
 			digester.complete(key);
 			std::cerr << "Using key: ";
 			dump32(key);
 			std::cerr << std::endl;
 
-			const auto source = load_file(args[4]);
+			auto source = load_file(args[3]);
 			const rijndael::constant_table constants {};
 			const cipher transcoder {constants, key};
+
+			auto idx = 0;
+			std::uint64_t counter {};
+			std::array<std::uint8_t, cipher::block_size> scratch {};
+			for (auto& b : source) {
+				const auto offset = idx % cipher::block_size;
+				if (offset == 0) {
+					std::memcpy(scratch.data(), &counter, sizeof(counter));
+					transcoder.encrypt(constants, scratch);
+					++counter;
+				}
+
+				b ^= gsl::at(scratch, offset);
+
+				++idx;
+			}
+
+			std::ofstream outfile {args[4], std::ofstream::binary};
+			outfile.exceptions(outfile.badbit | outfile.failbit);
+			outfile.write(source.data(), source.size());
 
 			return 0;
 		}
@@ -829,7 +845,7 @@ int main(int argc, char** argv)
 		return argentum::trace_tls(args);
 	else if (tool == "sha256")
 		return argentum::sha256_hash(args);
-	else if (tool == "aes256")
+	else if (tool == "aes256-ctr")
 		return argentum::aes256_transcode(args);
 	else {
 		std::cerr << "Unrecognized tool" << std::endl;
