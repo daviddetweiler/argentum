@@ -27,6 +27,8 @@
 
 #include "tls_1_3.h"
 
+#include <tdh.h>
+
 namespace argentum {
 	namespace {
 		struct sentinel_int {
@@ -784,11 +786,11 @@ namespace argentum {
 			return 0;
 		}
 
+		[[gsl::suppress("gsl.view")]]
 		int aes256_transcode(gsl::span<gsl::zstring> args)
 		{
 			if (args.size() < 5) {
-				std::cerr << "Usage: argentum aes256-ctr <keyfile> <in> <out>"
-						  << std::endl;
+				std::cerr << "Usage: argentum aes256-ctr <keyfile> <in> <out>" << std::endl;
 				return 1;
 			}
 
@@ -808,25 +810,119 @@ namespace argentum {
 			const rijndael::constant_table constants {};
 			const cipher transcoder {constants, key};
 
-			auto idx = 0;
-			std::uint64_t counter {};
 			std::array<std::uint8_t, cipher::block_size> scratch {};
-			for (auto& b : source) {
-				const auto offset = idx % cipher::block_size;
-				if (offset == 0) {
-					std::memcpy(scratch.data(), &counter, sizeof(counter));
+			const auto streamlen = source.size();
+			for (std::uint64_t streampos {}, block_id {}; streampos < streamlen; streampos += sizeof(std::uint64_t)) {
+				static_assert(cipher::block_size % sizeof(std::uint64_t) == 0);
+				const auto block_offset = streampos % cipher::block_size;
+				if (block_offset == 0) {
+					std::memcpy(scratch.data(), &block_id, sizeof(block_id));
 					transcoder.encrypt(constants, scratch);
-					++counter;
+					++block_id;
 				}
 
-				b ^= gsl::at(scratch, offset);
+				std::uint64_t a;
+				std::memcpy(&a, std::next(scratch.data(), block_offset), sizeof(a));
 
-				++idx;
+				const auto stream_ptr = std::next(source.data(), streampos);
+				std::uint64_t b;
+				std::memcpy(&b, stream_ptr, sizeof(b));
+
+				a ^= b;
+				std::memcpy(stream_ptr, &a, std::min(sizeof(a), streamlen - streampos));
 			}
 
 			std::ofstream outfile {args[4], std::ofstream::binary};
 			outfile.exceptions(outfile.badbit | outfile.failbit);
 			outfile.write(source.data(), source.size());
+
+			return 0;
+		}
+
+		std::wostream& operator<<(std::wostream& out, const GUID& guid)
+		{
+			out << std::format(
+				L"{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+				guid.Data1,
+				guid.Data2,
+				guid.Data3,
+				guid.Data4[0],
+				guid.Data4[1],
+				guid.Data4[2],
+				guid.Data4[3],
+				guid.Data4[4],
+				guid.Data4[5],
+				guid.Data4[6],
+				guid.Data4[7]);
+
+			return out;
+		}
+
+		[[gsl::suppress("r.3")]] [[gsl::suppress("r.11")]] [[gsl::suppress("r.3")]] [[gsl::suppress(
+			"r.5")]] [[gsl::suppress("bounds.3")]]
+		int events(gsl::span<gsl::zstring>)
+		{
+			PROVIDER_ENUMERATION_INFO* info_ptr {};
+			ULONG buflen {};
+			const auto alignment = std::align_val_t {alignof(PROVIDER_ENUMERATION_INFO)};
+			gsl::owner<void*> buffer {};
+			const auto free_buffer = [&buffer] {
+				::operator delete[](buffer, alignment);
+				buffer = nullptr;
+			};
+
+			const auto cleanup = gsl::finally(free_buffer);
+
+			for (auto n = 6; n < 24; ++n) {
+				buflen = 1ull << n;
+				buffer = ::operator new[](buflen, alignment);
+				void* const bufptr = buffer;
+				info_ptr = static_cast<PROVIDER_ENUMERATION_INFO*>(bufptr);
+				const auto err = TdhEnumerateProviders(info_ptr, &buflen);
+				if (err == ERROR_SUCCESS)
+					break;
+
+				if (err != ERROR_INSUFFICIENT_BUFFER) {
+					std::cerr << "[-] TdhEnumerateProviders(): " << err << std::endl;
+					return 1;
+				}
+
+				free_buffer();
+			}
+
+			if (!buffer) {
+				std::cerr << "[-] Exceeded maximum buffer size" << std::endl;
+				return 1;
+			}
+
+			// https://eel.is/c++draft/intro.object#note-3
+			// and https://eel.is/c++draft/basic.life#2.2
+			// Roughly, `info_ptr` ceases to be valid as soon as `records` is acccessed, since the new array object
+			// partially overlaps the old struct and is not a subobject.
+			// Which is fine.
+			const gsl::span records {info_ptr->TraceProviderInfoArray, info_ptr->NumberOfProviders};
+			std::cerr << "[+] Retrieved " << records.size() << " provider records" << std::endl;
+
+			std::wofstream dump {"providers.json"};
+			dump.exceptions(dump.badbit | dump.failbit);
+			dump << "[";
+			auto is_first = true;
+			for (const auto& record : records) {
+				const std::wstring_view name {
+					pun<const wchar_t>(std::next(static_cast<char*>(buffer), record.ProviderNameOffset))};
+
+				if (!is_first)
+					dump << ",";
+
+				is_first = false;
+				dump << "{";
+				dump << "\"name\": \"" << name << "\",";
+				dump << "\"guid\": \"" << record.ProviderGuid << "\",";
+				dump << "\"schema\": \"" << (record.SchemaSource ? "Windows MOF" : "XML") << "\"";
+				dump << "}";
+			}
+
+			dump << "]";
 
 			return 0;
 		}
@@ -847,6 +943,8 @@ int main(int argc, char** argv)
 		return argentum::sha256_hash(args);
 	else if (tool == "aes256-ctr")
 		return argentum::aes256_transcode(args);
+	else if (tool == "events")
+		return argentum::events(args);
 	else {
 		std::cerr << "Unrecognized tool" << std::endl;
 		return 1;
