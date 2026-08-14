@@ -858,25 +858,33 @@ namespace argentum {
 			return out;
 		}
 
-		[[gsl::suppress("r.3")]] [[gsl::suppress("r.11")]] [[gsl::suppress("r.3")]] [[gsl::suppress(
-			"r.5")]] [[gsl::suppress("bounds.3")]]
+		template <typename alignment_type>
+		struct aligned_array_deleter {
+			static constexpr std::align_val_t alignment {alignof(alignment_type)};
+			void operator()(void* ptr) const noexcept { ::operator delete[](ptr, alignment); }
+		};
+
+		template <typename alignment_type>
+		using aligned_storage = std::unique_ptr<std::byte, aligned_array_deleter<alignment_type>>;
+
+		template <typename alignment_type>
+		auto make_aligned_storage(std::size_t size)
+		{
+			constexpr std::align_val_t alignment {alignof(alignment_type)};
+			return aligned_storage<alignment_type> {static_cast<std::byte*>(::operator new[](size, alignment))};
+		}
+
+		[[gsl::suppress("r.3")]] [[gsl::suppress("r.3")]] [[gsl::suppress("r.5")]] [[gsl::suppress("bounds.3")]]
 		int events(gsl::span<gsl::zstring>)
 		{
 			PROVIDER_ENUMERATION_INFO* info_ptr {};
 			ULONG buflen {};
-			const auto alignment = std::align_val_t {alignof(PROVIDER_ENUMERATION_INFO)};
-			gsl::owner<void*> buffer {};
-			const auto free_buffer = [&buffer] {
-				::operator delete[](buffer, alignment);
-				buffer = nullptr;
-			};
-
-			const auto cleanup = gsl::finally(free_buffer);
+			aligned_storage<PROVIDER_ENUMERATION_INFO> buffer {};
 
 			for (auto n = 6; n < 24; ++n) {
 				buflen = 1ull << n;
-				buffer = ::operator new[](buflen, alignment);
-				void* const bufptr = buffer;
+				buffer = make_aligned_storage<PROVIDER_ENUMERATION_INFO>(buflen);
+				void* const bufptr = buffer.get();
 				info_ptr = static_cast<PROVIDER_ENUMERATION_INFO*>(bufptr);
 				const auto err = TdhEnumerateProviders(info_ptr, &buflen);
 				if (err == ERROR_SUCCESS)
@@ -886,8 +894,6 @@ namespace argentum {
 					std::cerr << "[-] TdhEnumerateProviders(): " << err << std::endl;
 					return 1;
 				}
-
-				free_buffer();
 			}
 
 			if (!buffer) {
@@ -899,8 +905,23 @@ namespace argentum {
 			// and https://eel.is/c++draft/basic.life#2.2
 			// Roughly, `info_ptr` ceases to be valid as soon as `records` is acccessed, since the new array object
 			// partially overlaps the old struct and is not a subobject.
-			// Which is fine.
-			const gsl::span records {info_ptr->TraceProviderInfoArray, info_ptr->NumberOfProviders};
+			// Which is fine. It's not clear to me if the lifetime of `info_ptr` ends the lifetime of the containing
+			// unsigged char array implicitly returned by operator new[], or just those unsigned chars it occupies.
+			// The assumed rules:
+			// - new[] returns an unsigned char array
+			// - Subsequent pointer casts to implicit-creation types allows their lifetimes to start without issue, with
+			// the expected object representation
+			// - Any time we implicitly start lifetime, it ends the lifetime of overlapping implicit-lifetime types (and
+			// invalidates their pointers)
+			// - End of lifetime of these types does not disturb object representation
+			// - Pointer arithmetic on the underlying unsigned char array is always defined
+			// Per https://timsong-cpp.github.io/cppwp/n4861/basic.memobj#intro.object-4.2, the lifetime of the unsigned
+			// char array is not ended by the objects it stores
+			const auto n_providers = info_ptr->NumberOfProviders;
+			const void* const records_ptr {
+				std::next(buffer.get(), offsetof(PROVIDER_ENUMERATION_INFO, TraceProviderInfoArray))};
+
+			const gsl::span records {static_cast<const TRACE_PROVIDER_INFO*>(records_ptr), n_providers};
 			std::cerr << "[+] Retrieved " << records.size() << " provider records" << std::endl;
 
 			std::wofstream dump {"providers.json"};
@@ -908,8 +929,7 @@ namespace argentum {
 			dump << "[";
 			auto is_first = true;
 			for (const auto& record : records) {
-				const std::wstring_view name {
-					pun<const wchar_t>(std::next(static_cast<char*>(buffer), record.ProviderNameOffset))};
+				const std::wstring_view name {pun<const wchar_t>(std::next(buffer.get(), record.ProviderNameOffset))};
 
 				if (!is_first)
 					dump << ",";
@@ -923,6 +943,8 @@ namespace argentum {
 			}
 
 			dump << "]";
+
+			// At this point we want to use TdhEnumerateManifestProviderEvents to load up the events they each declare
 
 			return 0;
 		}
