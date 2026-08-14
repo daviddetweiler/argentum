@@ -917,11 +917,32 @@ namespace argentum {
 			// - Pointer arithmetic on the underlying unsigned char array is always defined
 			// Per https://timsong-cpp.github.io/cppwp/n4861/basic.memobj#intro.object-4.2, the lifetime of the unsigned
 			// char array is not ended by the objects it stores
+			// Unfortunately, I think we have the following problem: once the info_ptr object ends its lifetime, the
+			// implicit creation of the records array leaves the elements with an indeterminate value, and reading from
+			// them is still UB.
+			// According to https://eel.is/c++draft/basic#stc.general-2, the implicitly created objects are of dynamic
+			// storage duration, and therefore, https://eel.is/c++draft/basic#indet-1.1 implies that the bytes of the
+			// underlying storage are formally considered to have indeterminate values, and it is UB to access the
+			// object without first overwriting it.
+			// My question is: does memmove succeed in producing the desired effect?
+			// According to https://eel.is/c++draft/c.strings#cstring.syn-3, std::memmove implicitly creates objects in
+			// the destination Then the semantics would be of implicitly creating an object with storage of
+			// indeterminate values, but _after_ the object representation has been "moved out of the way?" Yes,
+			// according to the same note.
 			const auto n_providers = info_ptr->NumberOfProviders;
-			const void* const records_ptr {
+			void* const records_ptr {
 				std::next(buffer.get(), offsetof(PROVIDER_ENUMERATION_INFO, TraceProviderInfoArray))};
 
-			const gsl::span records {static_cast<const TRACE_PROVIDER_INFO*>(records_ptr), n_providers};
+			// This has the effect of properly starting the lifetime of an initialized array here, but it simultaneously
+			// ending the lifetime of info_ptr's referent. This is needed because the array partially overlaps info_ptr,
+			// and so while the former's implicit creation and initialization is assumed to occur in the API call, we
+			// are now responsible for properly starting the lifetime and performing initialization for the new array
+			const gsl::span records {
+				static_cast<const TRACE_PROVIDER_INFO*>(
+					std::memmove(records_ptr, records_ptr, sizeof(TRACE_PROVIDER_INFO) * n_providers)),
+				n_providers,
+			};
+
 			std::cerr << "[+] Retrieved " << records.size() << " provider records" << std::endl;
 
 			std::wofstream dump {"providers.json"};
